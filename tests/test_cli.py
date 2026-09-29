@@ -1,5 +1,6 @@
 import os
 import tempfile
+from unittest import mock
 
 import pytest
 
@@ -105,3 +106,36 @@ def test_audit_clean(manifest_path, capsys):
     capsys.readouterr()
     rc = run(manifest_path, "audit")
     assert rc == 0
+
+
+def test_sync_neo4j_requires_password(manifest_path, capsys):
+    run(manifest_path, "init")
+    capsys.readouterr()
+    rc = run(manifest_path, "sync", "neo4j", "--url", "http://localhost:7474")
+    assert rc == 2
+    assert "no Neo4j password" in capsys.readouterr().err
+
+
+def test_sync_neo4j_calls_sync_with_manifest(manifest_path, capsys):
+    run(manifest_path, "init")
+    run(manifest_path, "add", "x", "--backend", "file", "--location", "/x")
+    capsys.readouterr()
+    with mock.patch("secretmap.neo4j_sync.sync", return_value=3) as mocked:
+        rc = run(manifest_path, "sync", "neo4j", "--url", "http://localhost:7474",
+                  "--user", "neo4j", "--password", "secret")
+    assert rc == 0
+    mocked.assert_called_once()
+    _, kwargs = mocked.call_args
+    assert kwargs["http_url"] == "http://localhost:7474"
+    assert kwargs["user"] == "neo4j"
+    assert kwargs["password"] == "secret"
+    assert "x" in mocked.call_args[0][0].secrets
+
+
+def test_sync_neo4j_reads_password_from_env(manifest_path, monkeypatch):
+    run(manifest_path, "init")
+    monkeypatch.setenv("SECRETMAP_NEO4J_PASSWORD", "from-env")
+    with mock.patch("secretmap.neo4j_sync.sync", return_value=1) as mocked:
+        rc = run(manifest_path, "sync", "neo4j", "--url", "http://localhost:7474")
+    assert rc == 0
+    assert mocked.call_args.kwargs["password"] == "from-env"

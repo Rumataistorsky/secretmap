@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import date, datetime
@@ -205,6 +206,40 @@ def cmd_audit(args) -> int:
     return 1
 
 
+def cmd_sync_neo4j(args) -> int:
+    m = _load(args)
+    password = args.password
+    if password is None:
+        env_var = args.password_env or "SECRETMAP_NEO4J_PASSWORD"
+        password = os.environ.get(env_var)
+    if not password:
+        print(f"error: no Neo4j password given (use --password, or set ${args.password_env or 'SECRETMAP_NEO4J_PASSWORD'})",
+              file=sys.stderr)
+        return 2
+
+    from .neo4j_sync import Neo4jSyncError, sync  # lazy import: keeps `neo4j` extras optional
+
+    try:
+        n = sync(m, http_url=args.url, user=args.user, password=password)
+    except Neo4jSyncError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"synced {len(m.secrets)} secret(s) to {args.url} ({n} statements executed).")
+    print("Try, e.g.: MATCH (h:SecretmapHost)-[:CONSUMES]->(s:SecretmapSecret) RETURN h.name, s.id")
+    return 0
+
+
+def cmd_sync_obsidian(args) -> int:
+    m = _load(args)
+    from .obsidian_sync import export_vault  # lazy import, stdlib-only but keeps sync/* symmetric
+
+    n_secrets, n_hosts = export_vault(m, args.vault_path)
+    print(f"wrote {n_secrets} secret note(s) and {n_hosts} host note(s) to {args.vault_path}")
+    print("Open that folder as an Obsidian vault (or a subfolder of one already synced "
+          "via Nextcloud) — notes regenerate on every sync, don't hand-edit them.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="secretmap",
@@ -269,6 +304,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("audit", help="find drift, overdue rotations, and unconsumed secrets")
     sp.add_argument("--bw", action="store_true", help="cross-check vaultwarden/bitwarden backends via `bw` CLI")
     sp.set_defaults(func=cmd_audit)
+
+    sp = sub.add_parser("sync", help="push the manifest into a graph backend for cross-host queries")
+    sync_sub = sp.add_subparsers(dest="sync_command", required=True)
+
+    nsp = sync_sub.add_parser("neo4j", help="sync into an existing Neo4j instance over its HTTP endpoint "
+                                             "(no `neo4j` driver dependency required)")
+    nsp.add_argument("--url", required=True, help="Neo4j HTTP endpoint, e.g. http://192.168.2.50:7474")
+    nsp.add_argument("--user", default="neo4j")
+    nsp.add_argument("--password", default=None,
+                      help="Neo4j password (prefer --password-env to avoid shell history exposure)")
+    nsp.add_argument("--password-env", default=None,
+                      help="env var to read the password from (default: SECRETMAP_NEO4J_PASSWORD)")
+    nsp.set_defaults(func=cmd_sync_neo4j)
+
+    osp = sync_sub.add_parser("obsidian", help="render the manifest as an Obsidian-compatible "
+                                                "folder of Markdown notes with [[wikilinks]]")
+    osp.add_argument("--vault-path", required=True,
+                      help="directory to write secrets/ and hosts/ subfolders into")
+    osp.set_defaults(func=cmd_sync_obsidian)
 
     return p
 
