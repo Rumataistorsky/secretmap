@@ -98,6 +98,64 @@ secretmap audit --bw   # cross-checks Vaultwarden/Bitwarden-backed entries via t
 - Run `secretmap audit` on a schedule (cron/CI) to catch overdue rotations
   and secrets nobody ever registered consumers for.
 
+## Graph views (optional)
+
+The manifest stays a flat JSON file on purpose (see "What it is not" above)
+— but once a fleet has enough secrets and hosts that "what breaks if I take
+down this whole host" stops being answerable by eye, two optional, purely
+generated views of the same data are available. Neither is a second source
+of truth; both are regenerated from `secretmap.json` every time you run
+them.
+
+### Neo4j
+
+Pushes `(:SecretmapHost)-[:CONSUMES]->(:SecretmapSecret)` into an existing
+Neo4j instance over its HTTP transactional endpoint — no `neo4j` driver
+dependency required, so the zero-dependency install story is unaffected
+even if you never use this.
+
+```bash
+export SECRETMAP_NEO4J_PASSWORD=...
+secretmap sync neo4j --url http://your-neo4j-host:7474 --user neo4j
+```
+
+```cypher
+// What breaks if I delete/rotate this secret?
+MATCH (h:SecretmapHost)-[c:CONSUMES]->(s:SecretmapSecret {id: "google-sa-receipts"})
+RETURN h.name, c.path, c.service
+
+// What breaks if this whole host goes down?
+MATCH (h:SecretmapHost {name: "LXC 414 (192.168.2.24)"})-[:CONSUMES]->(s:SecretmapSecret)
+RETURN s.id, s.backend, s.location
+
+// Secrets nobody has verified in the last 30 days
+MATCH (h:SecretmapHost)-[c:CONSUMES]->(s:SecretmapSecret)
+WHERE c.last_verified IS NULL OR date(c.last_verified) < date() - duration('P30D')
+RETURN s.id, h.name, c.path
+```
+
+Labels are namespaced (`Secretmap*`) so this never collides with unrelated
+data already living in a shared Neo4j instance. Re-running the sync
+converges the graph to match the manifest, including removing edges/nodes
+for entries deleted from the JSON.
+
+### Obsidian
+
+Renders the same data as a folder of plain Markdown notes with
+`[[wikilinks]]` between secrets and hosts — useful if you already keep
+infra notes in Obsidian and want this graph to live alongside them (e.g. in
+a vault folder synced via Nextcloud/Syncthing/git) rather than in a
+separate tool.
+
+```bash
+secretmap sync obsidian --vault-path /path/to/your/vault/secretmap
+```
+
+Produces `secrets/<id>.md` and `hosts/<slug>.md`, each with frontmatter and
+backlinks to the other side. Files carry a generated-content marker and are
+fully regenerated (stale entries removed) on every sync — don't hand-edit
+them, edit the manifest instead.
+
 ## Manifest format
 
 ```json
